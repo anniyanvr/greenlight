@@ -3,8 +3,8 @@
 # BigBlueButton open source conferencing system - http://www.bigbluebutton.org/.
 #
 # Copyright (c) 2018 BigBlueButton Inc. and by respective authors (see below).
-#
 # This program is free software; you can redistribute it and/or modify it under the
+#
 # terms of the GNU Lesser General Public License as published by the Free Software
 # Foundation; either version 3.0 of the License, or (at your option) any later
 # version.
@@ -39,7 +39,7 @@ class SessionsController < ApplicationController
         "#{Rails.configuration.relative_url_root}/auth/#{@providers.first}"
       end
 
-      redirect_to provider_path
+      redirect_post(provider_path, options: { authenticity_token: :auto })
     end
   end
 
@@ -79,8 +79,11 @@ class SessionsController < ApplicationController
     return switch_account_to_local(user) if !is_super_admin && auth_changed_to_local?(user)
 
     # Check correct password was entered
-    return redirect_to(signin_path, alert: I18n.t("invalid_credentials")) unless user.try(:authenticate,
-      session_params[:password])
+    unless user.try(:authenticate, session_params[:password])
+      logger.info "Support: #{session_params[:email]} login failed."
+      return redirect_to(signin_path, alert: I18n.t("invalid_credentials"))
+    end
+
     # Check that the user is not deleted
     return redirect_to root_path, flash: { alert: I18n.t("registration.banned.fail") } if user.deleted?
 
@@ -93,6 +96,9 @@ class SessionsController < ApplicationController
         return redirect_to(account_activation_path(digest: user.activation_digest))
       end
     end
+
+    return redirect_to edit_password_reset_path(user.create_reset_digest),
+flash: { alert: I18n.t("registration.insecure_password") } unless User.secure_password?(session_params[:password])
 
     login(user)
   end
@@ -134,21 +140,21 @@ class SessionsController < ApplicationController
     ldap_config[:auth_method] = ENV['LDAP_AUTH']
     ldap_config[:encryption] = case ENV['LDAP_METHOD']
                                when 'ssl'
-                                    'simple_tls'
-                                when 'tls'
-                                    'start_tls'
-                                end
+                                 'simple_tls'
+                               when 'tls'
+                                 'start_tls'
+                               end
     ldap_config[:base] = ENV['LDAP_BASE']
     ldap_config[:filter] = ENV['LDAP_FILTER']
     ldap_config[:uid] = ENV['LDAP_UID']
 
     if params[:session][:username].blank? || session_params[:password].blank?
-      return redirect_to(ldap_signin_path, alert: I18n.t("invalid_credentials"))
+      return redirect_to(ldap_signin_path, alert: I18n.t("invalid_credentials_external"))
     end
 
     result = send_ldap_request(params[:session], ldap_config)
 
-    return redirect_to(ldap_signin_path, alert: I18n.t("invalid_credentials")) unless result
+    return redirect_to(ldap_signin_path, alert: I18n.t("invalid_credentials_external")) unless result
 
     @auth = parse_auth(result.first, ENV['LDAP_ROLE_FIELD'], ENV['LDAP_ATTRIBUTE_MAPPING'])
 
@@ -260,11 +266,28 @@ class SessionsController < ApplicationController
 
   # Set the user's social id to the new id being passed
   def switch_account_to_social
-    user = User.find_by(email: @auth['info']['email'], provider: @user_domain, social_uid: nil)
+    user = User.find_by({
+      email: @auth['info']['email'],
+      provider: Rails.configuration.loadbalanced_configuration ? @user_domain : nil
+    }.compact)
 
-    logger.info "Switching account to social account for #{user.uid}"
+    logger.info "Switching social account for #{user.uid}"
 
     # Set the user's social id to the one being returned from auth
     user.update_attribute(:social_uid, @auth['uid'])
+  end
+
+  def ldap_encryption
+    encryption_method = case ENV['LDAP_METHOD']
+      when 'ssl'
+        'simple_tls'
+      when 'tls'
+        'start_tls'
+      end
+
+    {
+      method: encryption_method,
+      tls_options: OpenSSL::SSL::SSLContext::DEFAULT_PARAMS
+    }
   end
 end

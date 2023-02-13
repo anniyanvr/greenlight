@@ -286,7 +286,8 @@ describe RoomsController, type: :controller do
 
       post :join, params: { room_uid: room, join_name: "Join Name" }, session: { moderator_access_code: "abcdef" }
 
-      expect(response).to redirect_to(join_path(room, "Join Name", { user_is_moderator: true }, response.cookies["guest_id"]))
+      expect(response).to redirect_to(join_path(room, "Join Name", { user_is_moderator: true },
+response.cookies["guest_id"]))
     end
 
     it "should render wait if meeting isn't running" do
@@ -427,7 +428,8 @@ describe RoomsController, type: :controller do
 
       post :join, params: { room_uid: room, join_name: "Join Name" }, session: { moderator_access_code: "abcdef" }
 
-      expect(response).to redirect_to(join_path(room, "Join Name", { user_is_moderator: true }, response.cookies["guest_id"]))
+      expect(response).to redirect_to(join_path(room, "Join Name", { user_is_moderator: true },
+response.cookies["guest_id"]))
     end
 
     it "should join the room as moderator if the user has the moderator_access code (and regular access code is set)" do
@@ -533,6 +535,18 @@ describe RoomsController, type: :controller do
       end.to change { Room.count }.by(-1)
 
       expect(response).to redirect_to(@user.main_room)
+    end
+
+    it "should also delete shared rooms" do
+      guest = create(:user)
+      SharedAccess.create(room_id: @secondary_room.id, user_id: guest.id)
+
+      @request.session[:user_id] = @user.id
+
+      delete :destroy, params: { room_uid: @secondary_room }
+
+      expect(Room.exists?(@secondary_room.id)).to be false
+      expect(SharedAccess.exists?(room_id: @secondary_room.id, user_id: guest.id)).to be false
     end
 
     it "should not delete room if not owner" do

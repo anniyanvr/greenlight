@@ -21,6 +21,7 @@ require 'bbb_api'
 class User < ApplicationRecord
   include Deleteable
 
+  PASSWORD_PATTERN = /\A(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*(\W|_)).{8,}\z/
   after_create :setup_user
 
   before_save { email.try(:downcase!) }
@@ -28,7 +29,7 @@ class User < ApplicationRecord
   before_destroy :destroy_rooms
 
   has_many :rooms
-  has_many :shared_access
+  has_many :shared_access, dependent: :destroy
   belongs_to :main_room, class_name: 'Room', foreign_key: :room_id, required: false
 
   has_and_belongs_to_many :roles, join_table: :users_roles # obsolete
@@ -39,15 +40,20 @@ class User < ApplicationRecord
                    format: { without: %r{https?://}i }
   validates :provider, presence: true
   validate :check_if_email_can_be_blank
+  validate :check_domain, if: :greenlight_account?, on: :create
   validates :email, length: { maximum: 256 }, allow_blank: true,
                     uniqueness: { case_sensitive: false, scope: :provider },
                     format: { with: /\A[\w+\-'.]+@[a-z\d\-.]+\.[a-z]+\z/i }
 
-  validates :password, length: { minimum: 6 }, confirmation: true, if: :greenlight_account?, on: :create
+  validates :password, length: { minimum: 8 },
+            format: PASSWORD_PATTERN,
+            confirmation: true,
+            if: :validate_password?
 
-  # Bypass validation if omniauth
+  # Bypass validations if omniauth
   validates :accepted_terms, acceptance: true,
-                             unless: -> { !greenlight_account? || !Rails.configuration.terms }
+                             if: -> { greenlight_account? && Rails.configuration.terms },
+                             unless: -> { @bypass_terms_acceptance }
 
   # We don't want to require password validations on all accounts.
   has_secure_password(validations: false)
@@ -110,6 +116,10 @@ class User < ApplicationRecord
       search_param = "%#{sanitize_sql_like(string)}%"
       where(search_query, search: search_param)
     end
+
+    def secure_password?(pwd)
+      pwd.match? PASSWORD_PATTERN
+    end
   end
 
   # Returns a list of rooms ordered by last session (with nil rooms last)
@@ -122,7 +132,9 @@ class User < ApplicationRecord
   # Activates an account and initialize a users main room
   def activate
     set_role :user if role_id.nil?
-    update_attributes(email_verified: true, activated_at: Time.zone.now, activation_digest: nil)
+    without_terms_acceptance {
+      update_attributes(email_verified: true, activated_at: Time.zone.now, activation_digest: nil)
+    }
   end
 
   def activated?
@@ -136,13 +148,15 @@ class User < ApplicationRecord
   # Sets the password reset attributes.
   def create_reset_digest
     new_token = SecureRandom.urlsafe_base64
-    update_attributes(reset_digest: User.hash_token(new_token), reset_sent_at: Time.zone.now)
+    without_terms_acceptance {
+      update_attributes(reset_digest: User.hash_token(new_token), reset_sent_at: Time.zone.now)
+    }
     new_token
   end
 
   def create_activation_token
     new_token = SecureRandom.urlsafe_base64
-    update_attributes(activation_digest: User.hash_token(new_token))
+    without_terms_acceptance { update_attributes(activation_digest: User.hash_token(new_token)) }
     new_token
   end
 
@@ -158,7 +172,7 @@ class User < ApplicationRecord
 
   def name_chunk
     charset = ("a".."z").to_a - %w(b i l o s) + ("2".."9").to_a - %w(5 8)
-    chunk = name.parameterize[0...3]
+    chunk = name.parameterize(separator: "")[0...3]
     if chunk.empty?
       chunk + (0...3).map { charset.to_a[rand(charset.size)] }.join
     elsif chunk.length == 1
@@ -215,6 +229,26 @@ class User < ApplicationRecord
     update_attributes(main_room: room)
   end
 
+  # returns true if the user has attempted to log in too many times in the past 24 hours
+  def locked_out?
+    attempts = failed_attempts.to_i
+    within_1_day = (24.hours.ago..DateTime.now).cover?(last_failed_attempt)
+
+    return true if attempts > 5 && within_1_day
+
+    # reset the counter if the last login attempt was more than 1 day ago
+    update(failed_attempts: 0) if attempts.positive? && !within_1_day
+
+    false
+  end
+
+  def without_terms_acceptance
+    @bypass_terms_acceptance = true
+    block_res = yield
+    @bypass_terms_acceptance = false
+    block_res
+  end
+
   private
 
   # Destory a users rooms when they are removed.
@@ -234,6 +268,13 @@ class User < ApplicationRecord
     Role.create_default_roles(role_provider) if Role.where(provider: role_provider).count.zero?
   end
 
+  def check_domain
+    if Rails.configuration.require_email_domain.any? && !email.end_with?(*Rails.configuration.require_email_domain)
+      errors.add(:email, I18n.t("errors.messages.domain",
+        email_domain: Rails.configuration.require_email_domain.join("\" #{I18n.t('modal.login.or')} \"")))
+    end
+  end
+
   def check_if_email_can_be_blank
     if email.blank?
       if Rails.configuration.loadbalanced_configuration && greenlight_account?
@@ -242,6 +283,13 @@ class User < ApplicationRecord
         errors.add(:email, I18n.t("errors.messages.blank"))
       end
     end
+  end
+
+  def validate_password?
+    return false unless greenlight_account?
+    return true if new_record?
+    return true if persisted? && will_save_change_to_password_digest?
+    false
   end
 
   def role_provider

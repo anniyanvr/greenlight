@@ -27,7 +27,8 @@ class RoomsController < ApplicationController
                 unless: -> { !Rails.configuration.enable_email_verification }
   before_action :find_room, except: [:create, :join_specific_room, :cant_create_rooms]
   before_action :verify_room_ownership_or_admin_or_shared, only: [:start, :shared_access]
-  before_action :verify_room_ownership_or_admin, only: [:update_settings, :destroy, :preupload_presentation, :remove_presentation]
+  before_action :verify_room_ownership_or_admin,
+                only: [:room_settings, :update_settings, :destroy, :preupload_presentation, :remove_presentation]
   before_action :verify_room_ownership_or_shared, only: [:remove_shared_access]
   before_action :verify_room_owner_verified, only: [:show, :join],
                 unless: -> { !Rails.configuration.enable_email_verification }
@@ -435,10 +436,11 @@ class RoomsController < ApplicationController
 
   def record_meeting
     # If the require consent setting is checked, then check the room setting, else, set to true
+    user = current_user || @room.owner
     if recording_consent_required?
-      room_setting_with_config("recording")
+      room_setting_with_config("recording") && user&.role&.get_permission("can_launch_recording")
     else
-      true
+      user&.role&.get_permission("can_launch_recording")
     end
   end
 
